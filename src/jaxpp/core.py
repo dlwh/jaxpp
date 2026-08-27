@@ -59,6 +59,7 @@ from jaxpp.jax_primitives import (
     local_slice_p,
     local_stack_p,
     pipeline_yield_p,
+    precompile_task,
     recv_done_p,
     reuse_fence_p,
     slice_p,
@@ -3863,11 +3864,22 @@ class GlobalMpmdFunction:
                 )
         dime2.preinitialize_communicators(transfer_shardings)
 
-        dump_jaxpr(
-            local_closed_jaxprs[self.mpmd_mesh.my_mpmd_axis_index],
-            name=f"{self.name}.local",
-            ctx=pp_ctx,
-        )
+        local_closed_jaxpr = local_closed_jaxprs[self.mpmd_mesh.my_mpmd_axis_index]
+        for eqn in local_closed_jaxpr.eqns:
+            if eqn.primitive is not task_p:
+                continue
+            precompile_task(
+                mpmd_mesh=self.mpmd_mesh,
+                call_jaxpr=eqn.params["call_jaxpr"],
+                task_name=eqn.params["task_name"],
+                mpmd_idx=eqn.params["mpmd_idx"],
+                in_shardings=eqn.params["in_shardings"],
+                out_shardings=eqn.params["out_shardings"],
+                donate_invars=eqn.params["donate_invars"],
+            )
+        dime2.synchronize_initialization()
+
+        dump_jaxpr(local_closed_jaxpr, name=f"{self.name}.local", ctx=pp_ctx)
 
         return ScalarMpmdFunction(
             global_jaxpr=with_transfers,

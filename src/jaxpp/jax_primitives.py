@@ -1102,12 +1102,64 @@ def callable_task(prim: jcore.Primitive, params: PjitKwargs):
     )
 
 
+@jc.cache()
+def compiled_task(prim: jcore.Primitive, params: PjitKwargs):
+    return callable_task(prim, params).lower(*params.jaxpr.in_avals).compile()
+
+
 def apply_task(prim: jcore.Primitive, *args, params: PjitKwargs):
     with jax.set_mesh(params.ctx_mesh), warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message="Some donated buffers were not usable.*"
         )
-        return callable_task(prim, params)(*args)
+        return compiled_task(prim, params)(*args)
+
+
+def task_pjit_kwargs(
+    *,
+    call_jaxpr: jcore.ClosedJaxpr,
+    task_name: str,
+    mpmd_idx,
+    in_shardings: tuple[jax.NamedSharding, ...],
+    out_shardings: tuple[jax.NamedSharding, ...],
+    donate_invars,
+    mpmd_mesh: MpmdMesh,
+) -> PjitKwargs:
+    _, mesh = _resolve_placement(mpmd_mesh, mpmd_idx, name="task mpmd_idx")
+    return PjitKwargs(
+        jaxpr=call_jaxpr,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        in_layouts=(None,) * len(call_jaxpr.in_avals),
+        out_layouts=(None,) * len(out_shardings),
+        donated_invars=tuple(donate_invars),
+        ctx_mesh=mesh,
+        name=task_name,
+    )
+
+
+def precompile_task(
+    *,
+    call_jaxpr: jcore.ClosedJaxpr,
+    task_name: str,
+    mpmd_idx,
+    in_shardings: tuple[jax.NamedSharding, ...],
+    out_shardings: tuple[jax.NamedSharding, ...],
+    donate_invars,
+    mpmd_mesh: MpmdMesh,
+) -> None:
+    """Compile one local task before pipeline execution begins."""
+    params = task_pjit_kwargs(
+        call_jaxpr=call_jaxpr,
+        task_name=task_name,
+        mpmd_idx=mpmd_idx,
+        in_shardings=in_shardings,
+        out_shardings=out_shardings,
+        donate_invars=donate_invars,
+        mpmd_mesh=mpmd_mesh,
+    )
+    with jax.set_mesh(params.ctx_mesh):
+        compiled_task(jc.jit_p, params)
 
 
 check_in_shardings = False
@@ -1166,17 +1218,16 @@ def task_impl(
     call_counter: int | None = None,
 ):
     mpmd_mesh = MpmdMesh.mesh_stack[-1]
-    mpmd_indices, mesh = _resolve_placement(mpmd_mesh, mpmd_idx, name="task mpmd_idx")
+    mpmd_indices, _ = _resolve_placement(mpmd_mesh, mpmd_idx, name="task mpmd_idx")
 
-    pjit_kwargs = PjitKwargs(
-        jaxpr=call_jaxpr,
+    pjit_kwargs = task_pjit_kwargs(
+        call_jaxpr=call_jaxpr,
+        task_name=task_name,
+        mpmd_idx=mpmd_idx,
         in_shardings=in_shardings,
         out_shardings=out_shardings,
-        in_layouts=(None,) * len(args),
-        out_layouts=(None,) * len(out_shardings),
-        donated_invars=tuple(donate_invars),
-        ctx_mesh=mesh,
-        name=task_name,
+        donate_invars=donate_invars,
+        mpmd_mesh=mpmd_mesh,
     )
 
     # TODO(fixup_multidefs)

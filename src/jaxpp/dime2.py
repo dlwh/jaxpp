@@ -87,7 +87,7 @@ def get_nccl_id(devs: UniqueDevices) -> UniqueId:
 
 
 local_comms: dict[UniqueDevices, Communicator] = {}
-preinitialize_round = itertools.count()
+initialization_round = itertools.count()
 
 
 def get_or_create_comm(devs: UniqueDevices) -> Communicator:
@@ -166,8 +166,12 @@ def preinitialize_communicators(
     for devices in ordered_communicators:
         if any(device.process_index == my_process_index for device in devices):
             get_or_create_comm(devices)
+
+
+def synchronize_initialization() -> None:
+    """Wait until every process has completed runtime initialization."""
     get_distributed_client().wait_at_barrier(
-        f"jaxpp_preinitialize_communicators_{next(preinitialize_round)}",
+        f"jaxpp_runtime_initialization_{next(initialization_round)}",
         env_vars.jaxpp_client_timeout.value,
     )
 
