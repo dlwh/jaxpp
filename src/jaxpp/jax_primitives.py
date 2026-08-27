@@ -1112,7 +1112,7 @@ def apply_task(prim: jcore.Primitive, *args, params: PjitKwargs):
         warnings.filterwarnings(
             "ignore", message="Some donated buffers were not usable.*"
         )
-        return compiled_task(prim, params)(*args)
+        return callable_task(prim, params)(*args)
 
 
 def task_pjit_kwargs(
