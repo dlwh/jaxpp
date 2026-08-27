@@ -87,6 +87,7 @@ def get_nccl_id(devs: UniqueDevices) -> UniqueId:
 
 
 local_comms: dict[UniqueDevices, Communicator] = {}
+preinitialize_round = itertools.count()
 
 
 def get_or_create_comm(devs: UniqueDevices) -> Communicator:
@@ -101,6 +102,74 @@ def get_or_create_comm(devs: UniqueDevices) -> Communicator:
                     comm = Communicator.init(len(devs), devs.ranks[d], nccl_id)
         local_comms[devs] = comm
     return comm
+
+
+def communicator_devices(
+    local_sharding: jax.sharding.Sharding,
+    remote_sharding: jax.sharding.Sharding,
+    *,
+    is_send: bool,
+) -> tuple[UniqueDevices, ...]:
+    """Return the communicators required by a sharded point-to-point transfer."""
+    communicators = []
+    for local_device, remote_device in zip(
+        local_sharding._device_assignment,
+        remote_sharding._device_assignment,
+        strict=True,
+    ):
+        communicators.append(
+            communicator_devices_for_pair(local_device, remote_device, is_send=is_send)
+        )
+    return tuple(communicators)
+
+
+def communicator_devices_for_pair(
+    local_device: jax.Device, remote_device: jax.Device, *, is_send: bool
+) -> UniqueDevices:
+    if not env_vars.jaxpp_directional_communicators.value:
+        return UniqueSortedDevices(local_device, remote_device)
+    if is_send:
+        return UniqueDevices(local_device, remote_device)
+    return UniqueDevices(remote_device, local_device)
+
+
+def communicator_plan(
+    transfer_shardings: Sequence[
+        tuple[jax.sharding.Sharding, jax.sharding.Sharding, bool]
+    ],
+) -> tuple[UniqueDevices, ...]:
+    """Return the deduplicated transfer communicators in global creation order."""
+    communicators = {
+        devices
+        for local_sharding, remote_sharding, is_send in transfer_shardings
+        for devices in communicator_devices(
+            local_sharding, remote_sharding, is_send=is_send
+        )
+    }
+    return tuple(
+        sorted(communicators, key=lambda devices: tuple(d.id for d in devices))
+    )
+
+
+def preinitialize_communicators(
+    transfer_shardings: Sequence[
+        tuple[jax.sharding.Sharding, jax.sharding.Sharding, bool]
+    ],
+) -> None:
+    """Create all transfer communicators in a deterministic global order."""
+    ordered_communicators = communicator_plan(transfer_shardings)
+    my_process_index = jax.process_index()
+    logger.info(
+        "Preinitializing %d transfer communicators in global order",
+        len(ordered_communicators),
+    )
+    for devices in ordered_communicators:
+        if any(device.process_index == my_process_index for device in devices):
+            get_or_create_comm(devices)
+    get_distributed_client().wait_at_barrier(
+        f"jaxpp_preinitialize_communicators_{next(preinitialize_round)}",
+        env_vars.jaxpp_client_timeout.value,
+    )
 
 
 local_streams: dict[tuple[jax.Device, jax.Device], Stream] = {}
@@ -174,15 +243,7 @@ def get_shard_ops_and_capsules(
         capsules.append(ShardCapsule(x_device, stream, capsule))
         data_ptr, count, nccl_dtype = dlpack_nccl_args(capsule)
 
-        key = (
-            UniqueSortedDevices(x_device, remote_device)
-            if not env_vars.jaxpp_directional_communicators.value
-            else (
-                UniqueDevices(x_device, remote_device)
-                if is_send
-                else UniqueDevices(remote_device, x_device)
-            )
-        )
+        key = communicator_devices_for_pair(x_device, remote_device, is_send=is_send)
         comm = get_or_create_comm(key)
 
         operations.append(

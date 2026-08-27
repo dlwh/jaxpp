@@ -40,7 +40,7 @@ import jax.extend.source_info_util as jsiu
 import jax.interpreters.partial_eval as pe
 from jax.interpreters.ad import add_jaxvals_p as add_any_p
 
-from jaxpp import array_ops, env_vars
+from jaxpp import array_ops, dime2, env_vars
 from jaxpp import jax_compat as jc
 from jaxpp.array import MpmdArray
 from jaxpp.jax_compat import core as jcore
@@ -3839,6 +3839,29 @@ class GlobalMpmdFunction:
             )
             for local_jaxpr in local_jaxprs
         ]
+
+        transfer_shardings = []
+        for local_closed_jaxpr in local_closed_jaxprs:
+            for eqn in local_closed_jaxpr.eqns:
+                if eqn.primitive is not transfer_start_p:
+                    continue
+                transfer_shardings.extend(
+                    zip(
+                        eqn.params["send_local_shardings"],
+                        eqn.params["send_remote_shardings"],
+                        (True,) * len(eqn.params["send_local_shardings"]),
+                        strict=True,
+                    )
+                )
+                transfer_shardings.extend(
+                    zip(
+                        eqn.params["recv_local_shardings"],
+                        eqn.params["recv_remote_shardings"],
+                        (False,) * len(eqn.params["recv_local_shardings"]),
+                        strict=True,
+                    )
+                )
+        dime2.preinitialize_communicators(transfer_shardings)
 
         dump_jaxpr(
             local_closed_jaxprs[self.mpmd_mesh.my_mpmd_axis_index],

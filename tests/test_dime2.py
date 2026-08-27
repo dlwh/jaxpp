@@ -25,7 +25,12 @@ from parameterized import parameterized
 
 import jaxpp.distributed_utils as jppdu
 from jaxpp.core import to_local_jaxprs
-from jaxpp.dime2 import cuda_device, get_distributed_client, start_transfer
+from jaxpp.dime2 import (
+    communicator_plan,
+    cuda_device,
+    get_distributed_client,
+    start_transfer,
+)
 from jaxpp.experimental import mpmd
 from jaxpp.jax_compat import core as jcore
 from jaxpp.jax_primitives import (
@@ -39,6 +44,31 @@ from jaxpp.mesh import MpmdMesh
 
 _ASYNC_READ_DELAY_MATRIX_SIZE = 4096
 _ASYNC_READ_DELAY_STEPS = 512
+
+
+class _TestSharding:
+    def __init__(self, devices):
+        self._device_assignment = tuple(devices)
+
+
+class _TestDevice:
+    def __init__(self, device_id):
+        self.id = device_id
+        self.process_index = device_id // 8
+
+
+def test_communicator_plan_deduplicates_and_sorts_by_device_ids():
+    devices = [_TestDevice(device_id) for device_id in (0, 8, 16)]
+    transfer_shardings = (
+        (_TestSharding((devices[1],)), _TestSharding((devices[2],)), True),
+        (_TestSharding((devices[0],)), _TestSharding((devices[2],)), False),
+        (_TestSharding((devices[1],)), _TestSharding((devices[0],)), True),
+        (_TestSharding((devices[0],)), _TestSharding((devices[1],)), False),
+    )
+
+    plan = communicator_plan(transfer_shardings)
+
+    assert tuple(devices.key for devices in plan) == ("0,8", "0,16", "8,16")
 
 
 @jax.jit
